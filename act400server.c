@@ -10,7 +10,33 @@
 #include <unistd.h>
 #include <sys/types.h> 
 #include <sys/socket.h>
+#include <signal.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <resolv.h>
+#include <arpa/inet.h>
+
+//#define fetch_size_of(x) (sizeof (x) / sizeof (x)[0])
+
+// Multithread
+int childpid=-1;
+int nb_threads=0;
+int max_threads=3;
+struct sigaction sa;
+
+/* Fonction qui veille aux signaux de fins de threads, permet de décrémenter le compteur
+* @author Yann GAUTHERON <ygautheron@absystech.fr>
+* @param int s Signal
+*/
+void sigchld_handler(int s) {
+	if (childpid>0) {
+    	while(waitpid(-1, NULL, WNOHANG) > 0);
+		nb_threads--;
+		printf("--SERVEUR-- Nouveau thread libre (%d en travail sur %d max)...\n",nb_threads,max_threads);
+	}
+}
 
 /* Execute une commande OS400
 * @author Yann GAUTHERON <ygautheron@absystech.fr>
@@ -68,27 +94,14 @@ int checkIP(char *source, char *search) {
 
 /* Supprime les espaces qui entourent une chaine
 * @author Yann GAUTHERON <ygautheron@absystech.fr>
-* @param char *str Chaine à modifier
+* @param char *s Chaine à modifier
 */
-char *trim(char *str){
-	char *end;
-
-	// Trim leading space
-	while(isspace(*str)) {
-		str++;
-	}
-
-	if(*str == 0)  // All spaces?
-	return str;
-
-	// Trim trailing space
-	end = str + strlen(str) - 1;
-	while(end > str && isspace(*end)) end--;
-
-	// Write new null terminator
-	*(end+1) = 0;
-
-	return str;
+void trim(char * s) {
+    char * p = s;
+    int l = strlen(p);
+    while(isspace(p[l - 1])) p[--l] = 0;
+    while(* p && isspace(* p)) ++p, --l;
+    memmove(s, p, l + 1);
 }
 
 /*
@@ -110,6 +123,8 @@ int main(int argc, char *argv[]) {
 	const char* transformSecondary = "system \"ACTCTLSPE/%s\"";
 	const char* transformForced = "system \"%s\"";
 	
+	signal(SIGCHLD, SIG_IGN);
+	
 	int sockfd, newsockfd, portno,cli_portno;
 	socklen_t clilen;
 	char buffer[2048];
@@ -118,7 +133,7 @@ int main(int argc, char *argv[]) {
 	int n;
     char result[42000]; // Buffer de résultat de la commande
 	if (argc < 2) {
-		fprintf(stderr,"ERREUR, aucun port fourni en parametre. Usage : %s port [ip_autorisee1[,ip_autorisee2[...]]]\n",argv[0]);
+		fprintf(stderr,"ERREUR, aucun port fourni en parametre. Usage : %s port [max_threads (3 par defaut)] [ip_autorisee1[,ip_autorisee2[...]]]\n",argv[0]);
 		exit(1);
 	}
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -127,86 +142,110 @@ int main(int argc, char *argv[]) {
 	}
 	bzero((char *) &serv_addr, sizeof(serv_addr));
 	portno = atoi(argv[1]);
+	if (argc >= 3) {
+		max_threads = atoi(argv[2]);
+	}
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_addr.s_addr = INADDR_ANY;
 	serv_addr.sin_port = htons(portno);
-	printf("Socket cree sur le port %i.\n",portno);
+	printf("--SERVEUR-- Socket cree sur le port %i.\n",portno);
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
 		error("ERREUR bind socket");
 	}
 	listen(sockfd,5);
 	clilen = sizeof(cli_addr);
+	
+	// Signaux des enfants
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(1);
+    }
+	
 	while (1) {
-		printf("------- Socket en attente d'acceptation...\n");
+		printf("--SERVEUR-- Socket en attente d'acceptation...\n");
+		
+		// Calcul du nombre de threads disponibles
+		while (nb_threads>=max_threads) {
+			printf("--SERVEUR-- Maximum de thread atteint, attente d'un slot libre (%d en travail sur %d max)...\n",nb_threads,max_threads);
+			wait();
+		}
+	
 		newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
-
-		// signal(SIGCHLD, SIG_IGN);
-		// switch( childpid=fork()){
-		// case -1://error
-			// fprintf(stderr, "Error spawning the child %d\n",errno);
-			// exit(0);
-		// case 0://in the child
-			// SocketHandler(csock);
-			// exit(0);
-		// default://in the server
-			// close(*csock);
-			// free(csock);
-		// }		
+		
+		switch(childpid=fork()){
+			case -1://error
+				fprintf(stderr, "Error spawning the child %d\n",errno);
+				exit(0);
 				
-		
-		if (newsockfd < 0) {
-			error("ERREUR accept socket");
-		}
-		bzero(buffer,sizeof(buffer)); // Clean du buffer
-		
-		// Réception du client
-		getpeername(newsockfd, (struct sockaddr*)&cli_addr, &clilen);	
-		struct sockaddr_in *s = (struct sockaddr_in *)&cli_addr;
-		cli_portno = ntohs(s->sin_port);
-		inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
-		
-		printf("Socket client connecte, en attente de sa commande %s:%i.\n",ipstr,cli_portno);
-		
-		// Vérification de l'IP acceptée
-		if (argc<3 || checkIP(argv[2],ipstr)==0) {
-		//if (argc<3 || strcmp(argv[2],ipstr)==0) {
-			// Lecture du message
-			n = read(newsockfd,buffer,sizeof(buffer)-1);
-			if (n < 0) {
-				error("ERREUR lecture depuis socket");
-			}
-//printf("Avant trim :|%s|\n",buffer);
-			strcpy(buffer, trim(buffer));
-//printf("Apres trim :|%s|\n",buffer);
-//			printf("Reception de la commande : %s\n",buffer);
-
-			if (strstr(buffer,"ACTCTLSPE/")!=NULL) {
-				// Prefixe forcé
-				printf("Prefixe forced\n");
-				execOS400(buffer, (char *)&result, sizeof(result), (char *)transformForced);
-			} else {
-				// Si la commande échoue, on change le prefixe en ACTCTLSPE/
-				if (execOS400(buffer, (char *)&result, sizeof(result), (char *)transformPrimary)!=0) {
-					//printf("La commande ne semble pas exister dans la bibliotheque primaire (%s), essai dans la bibliotheque secondaire...\n","CPD0030:",result);
-					execOS400(buffer, (char *)&result, sizeof(result), (char *)transformSecondary);
+			case 0://thread enfant	
+				printf("Connexion ouverte enfant %d.\n",getpid());
+				if (newsockfd < 0) {
+					error("ERREUR accept socket");
 				}
-			}
-			
-			// Envoi au client
-			printf("Envoi du resultat au client.\n");
-			n = write(newsockfd,result,sizeof(result));
-			if (n < 0) {
-				error("ERREUR ecriture vers socket");
-			}	
-		} else {
-			fprintf(stderr,"ERREUR, adresse IP non autorisee (differente de %s).\n",argv[2]);
-		}
-		close(newsockfd);
-		printf("Connexion fermee.\n");
+				bzero(buffer,sizeof(buffer)); // Clean du buffer
+				
+				// Réception du client
+				getpeername(newsockfd, (struct sockaddr*)&cli_addr, &clilen);	
+				struct sockaddr_in *s = (struct sockaddr_in *)&cli_addr;
+				cli_portno = ntohs(s->sin_port);
+				inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
+				
+				printf("Socket client connecte, en attente de sa commande %s:%i.\n",ipstr,cli_portno);
+				
+				// Vérification de l'IP acceptée
+				if (argc<3 || checkIP(argv[3],ipstr)==0) {
+					// Lecture du message
+					n = read(newsockfd,buffer,sizeof(buffer)-1);
+					if (n < 0) {
+						error("ERREUR lecture depuis socket");
+					}
+					
+					//printf("Avant trim :|%s|\n",buffer);
+					trim(buffer);
+					//printf("Apres trim :|%s|\n",buffer);
+					//printf("Reception de la commande : %s\n",buffer);
+
+					if (strstr(buffer,"ACTCTLSPE/")!=NULL) {
+						// Prefixe forcé
+						printf("Prefixe forced\n");
+						execOS400(buffer, (char *)&result, sizeof(result), (char *)transformForced);
+					} else {
+						// Si la commande échoue, on change le prefixe en ACTCTLSPE/
+						if (execOS400(buffer, (char *)&result, sizeof(result), (char *)transformPrimary)!=0) {
+							//printf("La commande ne semble pas exister dans la bibliotheque primaire (%s), essai dans la bibliotheque secondaire...\n","CPD0030:",result);
+							execOS400(buffer, (char *)&result, sizeof(result), (char *)transformSecondary);
+						}
+					}
+					
+					// Envoi au client
+					printf("Envoi du resultat au client.\n");
+					n = write(newsockfd,result,sizeof(result));
+					if (n < 0) {
+						error("ERREUR ecriture vers socket");
+					}	
+				} else {
+					fprintf(stderr,"ERREUR, adresse IP non autorisee (differente de %s).\n",argv[3]);
+				}
+printf("Attente 15 secondes enfant %d.\n",getpid());
+sleep(15);
+				printf("Connexion fermee enfant %d.\n",getpid());
+				close(newsockfd);
+				exit(0);
+				
+			default://serveur pere
+				nb_threads++;
+				printf("--SERVEUR-- Changement nombre de thread en cours (%d en travail sur %d max)...\n",nb_threads,max_threads);
+				printf("--SERVEUR-- Connexion fermee.\n");
+				close(newsockfd);
+				//free(newsockfd);
+		}		
 		
 		// Terminer le fils
-		printf("Attente 5 secondes\n");
-		sleep(5);
+		//printf("--SERVEUR-- Attente 5 secondes\n");
+		//sleep(5);
 
 	}
 	close(sockfd);
