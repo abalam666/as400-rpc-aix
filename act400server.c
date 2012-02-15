@@ -21,10 +21,10 @@
 //#define fetch_size_of(x) (sizeof (x) / sizeof (x)[0])
 
 // Constantes
-const char *version = "1.0.1";
-
-// Variables globales
-volatile sig_atomic_t suicide = 0; /* controls program termination */
+const char *version = "1.0.3";
+const char *transformPrimary = "system \"ACTCTL/%s\" 2<&1";
+const char *transformSecondary = "system \"ACTCTLSPE/%s\" 2<&1";
+const char *transformForced = "system \"%s\" 2<&1";
 
 // Multithread
 int childpid=-1;
@@ -54,11 +54,9 @@ void sigchld_handler(int s); /* change le compteur nb_threads */
 int execOS400(char *cmd, char *result, int result_size, char *transform) {
 	char buf[2048]; // variable temporaire
     FILE* fp; // Descripteur de lecture de l'exécution de la commande
-//	bzero(buf,sizeof(buf)); // Clean du buffer
 	bzero(result,result_size); // Clean du result
-	
 	snprintf(buf, sizeof buf, transform, cmd);
-	printf("     [%d] Transformation de la commande en : %s\n",getpid(),buf);
+	printf("     [%d] Execution de la commande en : %s\n",getpid(),buf);
 	
 	// Execution de la commande
 	fp = popen(buf,"r");
@@ -142,7 +140,7 @@ void sigchld_handler(int s) {
 */
 void handletimeout(int s) {
 	printf("     [%d] TIMEOUT ! Thread enfant depasse la limite de temps (%d secondes)\n",getpid(),timeout);
-	write(newsockfd,"timeout\n",8);
+	write(newsockfd,"TLS8890: Time Out sur le service OS/400\n",40);
 	close(newsockfd);
 	exit(0);
 }
@@ -152,10 +150,6 @@ void handletimeout(int s) {
 * @author Yann GAUTHERON <ygautheron@absystech.fr>
 */
 int main(int argc, char *argv[]) {
-	const char* transformPrimary = "system \"ACTCTL/%s\"";
-	const char* transformSecondary = "system \"ACTCTLSPE/%s\"";
-	const char* transformForced = "system \"%s\"";
-
 	signal(SIGCHLD, SIG_IGN);
 	
 	int sockfd, portno,cli_portno;
@@ -222,7 +216,7 @@ int main(int argc, char *argv[]) {
 		// Calcul du nombre de threads disponibles
 		if (nb_threads>=max_threads) {
 			printf("--SERVEUR-- Maximum de threads atteint, attente d'un thread libre (%d en travail sur %d maximum)...\n",nb_threads,max_threads);
-			wait();
+			wait(NULL);
 		} else {
 		
 			newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
@@ -287,7 +281,7 @@ int main(int argc, char *argv[]) {
 							}	
 						} else {
 							fprintf(stderr,"     [%d] ERREUR, adresse IP non autorisee.\n",getpid());
-							write(newsockfd,"unauthorized\n",13); // Message pour informer le client de l'erreur
+							write(newsockfd,"TLS8891: Requette OptimAct interdite depuis cette adresse IP\n",61); // Message pour informer le client de l'erreur
 						}
 
 						printf("     [%d] Connexion fermee enfant !\n",getpid());
