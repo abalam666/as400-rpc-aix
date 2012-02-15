@@ -1,6 +1,6 @@
 /*
 * Serveur de socket pour OS400
-* Lancer le serveur avec la commande : ./act400server port [max_threads] [ip_autorisee1[,ip_autorisee2[...]]] [timeout (en secondes)] 2<&1
+* Lancer le serveur avec la commande : ./act400server port [max_threads] [ip_autorisee1[,ip_autorisee2[...]]] [timeout (en secondes)]
 * @author Yann GAUTHERON <ygautheron@absystech.fr>
 * @date 2012-02-03
 */
@@ -257,10 +257,7 @@ int main(int argc, char *argv[]) {
 								exit(1);						
 							}
 							
-							//printf("Avant trim :|%s|\n",buffer);
 							trim(buffer);
-							//printf("Apres trim :|%s|\n",buffer);
-							//printf("Reception de la commande : %s\n",buffer);
 
 							if (strstr(buffer,"ACTCTLSPE/")!=NULL) {
 								// Prefixe forcé
