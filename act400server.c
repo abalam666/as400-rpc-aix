@@ -1,6 +1,6 @@
 /*
 * Serveur de socket pour OS400
-* Lancer le serveur avec la commande : ./act400server port [max_threads] [ip_autorisee1[,ip_autorisee2[...]]] [timeout (en secondes)]
+* Lancer le serveur avec la commande : ./act400server port [max_threads] [ip_autorisee1[,ip_autorisee2[...]]] [timeout (en secondes)] ["nolog"]
 * @author Yann GAUTHERON <ygautheron@absystech.fr>
 * @date 2012-02-03
 */
@@ -21,7 +21,7 @@
 //#define fetch_size_of(x) (sizeof (x) / sizeof (x)[0])
 
 // Constantes
-const char *version = "1.0.3";
+const char *version = "1.0.6";
 const char *transformPrimary = "system \"ACTCTL/%s\" 2<&1";
 const char *transformSecondary = "system \"ACTCTLSPE/%s\" 2<&1";
 const char *transformForced = "system \"%s\" 2<&1";
@@ -33,6 +33,9 @@ int max_threads=10;
 int timeout=0;
 struct sigaction sa;
 int newsockfd;
+
+// Journal d'activité
+int logger=0;
 
 // Function prototypes
 void sigchld_handler(int s); /* décrémenter les signaux */
@@ -56,13 +59,17 @@ int execOS400(char *cmd, char *result, int result_size, char *transform) {
     FILE* fp; // Descripteur de lecture de l'exécution de la commande
 	bzero(result,result_size); // Clean du result
 	snprintf(buf, sizeof buf, transform, cmd);
-	printf("     [%d] Execution de la commande en : %s\n",getpid(),buf);
+	if (logger) {
+		printf("     [%d] Execution de la commande en : %s\n",getpid(),buf);
+	}
 	
 	// Execution de la commande
 	fp = popen(buf,"r");
 	fread(result,1,result_size,fp);
 	fclose(fp);
-	printf("     [%d] La commande a retourne :\n%s",getpid(),result);
+	if (logger) {
+		printf("     [%d] La commande a retourne :\n%s",getpid(),result);
+	}
 	
 	bzero(buf,sizeof(buf));
 	strncpy(buf, (char *)result, 8);
@@ -80,7 +87,7 @@ int execOS400(char *cmd, char *result, int result_size, char *transform) {
 * @return int 0 si trouvé, -1 sinon
 */
 int checkIP(char *source, char *search) {
-	if (strcmp(source,"*all")==0) {
+	if (strstr(source,"*all") != NULL) {
 		return 0; // Toutes les IP sont acceptées
 	}
 	char tmp[strlen(source)+1]; // variable temporaire
@@ -116,10 +123,12 @@ void trim(char * s) {
 */
 void update_threads(int inc) {
 	nb_threads+=inc;
-	if (inc>0) {
-		printf("--SERVEUR-- Nouveau thread occupe (%d en travail sur %d maximum)\n",nb_threads,max_threads);
-	} else {
-		printf("--SERVEUR-- Nouveau thread libre (%d en travail sur %d maximum)...\n",nb_threads,max_threads);
+	if (logger) {
+		if (inc>0) {
+			printf("--SERVEUR-- Nouveau thread occupe (%d en travail sur %d maximum)\n",nb_threads,max_threads);
+		} else {
+			printf("--SERVEUR-- Nouveau thread libre (%d en travail sur %d maximum)...\n",nb_threads,max_threads);
+		}
 	}
 }
 
@@ -179,7 +188,7 @@ int main(int argc, char *argv[]) {
 		max_threads=atoi(argv[2]);
 	}
 	printf("--SERVEUR-- Nombre maximum de thread = %d\n",max_threads);
-	if (argc>=4 && strcmp(argv[3],"*all")!=0) { // Affichage des IP autorisées
+	if (argc>=4 && strstr(argv[3],"*all")==NULL) { // Affichage des IP autorisées
 		printf("--SERVEUR-- IP autorisees = %s\n",argv[3]);
 	} else {
 		printf("--SERVEUR-- Toutes les IP sont autorisees\n",argv[3]);
@@ -190,6 +199,16 @@ int main(int argc, char *argv[]) {
 	} else {
 		printf("--SERVEUR-- Temps maximum par thread illimite\n",timeout);
 	}
+	
+	// Avec ou sans log
+	if (argc>=6) {
+		logger = 0;
+		printf("--SERVEUR-- Rapport d'activite des threads enfants DESACTIVE\n");
+	} else {
+		logger = 1;
+		printf("--SERVEUR-- Rapport d'activite des threads enfants ACTIVE\n");
+	}
+	
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_addr.s_addr = INADDR_ANY;
 	serv_addr.sin_port = htons(portno);
@@ -211,11 +230,15 @@ int main(int argc, char *argv[]) {
     }
 	
 	while (1) {
-		printf("--SERVEUR-- En attente de clients...\n");
+		if (logger) {
+			printf("--SERVEUR-- En attente de clients...\n");
+		}
 		
 		// Calcul du nombre de threads disponibles
 		if (nb_threads>=max_threads) {
-			printf("--SERVEUR-- Maximum de threads atteint, attente d'un thread libre (%d en travail sur %d maximum)...\n",nb_threads,max_threads);
+			if (logger) {
+				printf("--SERVEUR-- Maximum de threads atteint, attente d'un thread libre (%d en travail sur %d maximum)...\n",nb_threads,max_threads);
+			}
 			wait(NULL);
 		} else {
 		
@@ -223,7 +246,7 @@ int main(int argc, char *argv[]) {
 			if (newsockfd>=0) {
 				switch(childpid=fork()){
 					case -1://error
-						fprintf(stderr, "Error spawning the child %d\n",errno);
+						fprintf(stderr, "Erreur de creation de thread enfant %d\n",errno);
 						exit(0);
 						
 					case 0://thread enfant
@@ -231,11 +254,14 @@ int main(int argc, char *argv[]) {
 							signal(SIGALRM, handletimeout);
 							alarm(timeout);
 						}						
-					
-						printf("     [%d] Connexion ouverte enfant...\n",getpid());
+						if (logger) {
+							printf("     [%d] Connexion ouverte enfant...\n",getpid());
+						}
 						if (newsockfd < 0) {
-							printf("     [%d] ERREUR accept socket !\n",getpid());
-							perror("ERREUR accept socket !");
+							if (logger) {
+								printf("     [%d] ERREUR accept socket !\n",getpid());
+								perror("ERREUR accept socket !");
+							}
 							exit(1);						
 						}
 						bzero(buffer,sizeof(buffer)); // Clean du buffer
@@ -246,7 +272,9 @@ int main(int argc, char *argv[]) {
 						cli_portno = ntohs(s->sin_port);
 						inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof ipstr);
 						
-						printf("     [%d] Socket client connecte, en attente de sa commande %s:%i...\n",getpid(),ipstr,cli_portno);
+						if (logger) {
+							printf("     [%d] Socket client connecte, en attente de sa commande %s:%i...\n",getpid(),ipstr,cli_portno);
+						}
 						
 						// Vérification de l'IP acceptée
 						if (argc<4 || checkIP(argv[3],ipstr)==0) {
@@ -270,7 +298,9 @@ int main(int argc, char *argv[]) {
 							}
 							
 							// Envoi au client
-							printf("     [%d] Envoi du resultat au client\n",getpid());
+							if (logger) {
+								printf("     [%d] Envoi du resultat au client\n",getpid());
+							}
 							n = write(newsockfd,result,sizeof(result));
 							if (n < 0) {
 								perror("ERREUR ecriture vers socket !");
@@ -280,14 +310,18 @@ int main(int argc, char *argv[]) {
 							fprintf(stderr,"     [%d] ERREUR, adresse IP non autorisee.\n",getpid());
 							write(newsockfd,"TLS8891: Requette OptimAct interdite depuis cette adresse IP\n",61); // Message pour informer le client de l'erreur
 						}
-
-						printf("     [%d] Connexion fermee enfant !\n",getpid());
+						
+						if (logger) {
+							printf("     [%d] Connexion fermee enfant !\n",getpid());
+						}
 						close(newsockfd);
 						exit(0);
 
 					default://serveur pere
 						update_threads(1);
-						printf("--SERVEUR-- Connexion fermee !\n");
+						if (logger) {
+							printf("--SERVEUR-- Connexion fermee !\n");
+						}
 						//close(newsockfd);
 				}
 			}
